@@ -1,0 +1,165 @@
+##
+## Ghost Deployment
+##
+## Key differences from the generic reference:
+##   - ServiceAccount with IRSA (AWS creds via token projection, not node role)
+##   - TopologySpreadConstraints: pods spread across AZs (not just nodes)
+##   - securityContext: non-root, read-only root filesystem where possible
+##   - No MySQL env vars — RDS endpoint in ConfigMap, password from ESO Secret
+##
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ghost
+  namespace: ghost-prod
+  labels:
+    app: ghost
+    version: "5"
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0     # zero-downtime: always keep full capacity during deploys
+  selector:
+    matchLabels:
+      app: ghost
+  template:
+    metadata:
+      labels:
+        app: ghost
+        version: "5"
+    spec:
+      serviceAccountName: ghost    # binds IRSA — pods get AWS credentials via token
+
+      # Spread pods across AZs. Without this, scheduler may place all replicas
+      # in the same AZ and a single AZ failure takes down the service.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: ghost
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: ghost
+
+      # Karpenter handles scheduling; no specific node affinity needed.
+      # Uncomment to force on-demand if Ghost must never land on spot:
+      # affinity:
+      #   nodeAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       nodeSelectorTerms:
+      #         - matchExpressions:
+      #             - key: karpenter.sh/capacity-type
+      #               operator: In
+      #               values: [on-demand]
+
+      # Graceful shutdown: give Ghost time to finish in-flight requests
+      terminationGracePeriodSeconds: 60
+
+      containers:
+        - name: ghost
+          image: ghost:5-alpine
+          ports:
+            - containerPort: 2368
+              name: http
+
+          envFrom:
+            - configMapRef:
+                name: ghost-config
+
+          env:
+            - name: database__connection__user
+              valueFrom:
+                secretKeyRef:
+                  name: ghost-secrets
+                  key: mysql-ghost-user
+            - name: database__connection__password
+              valueFrom:
+                secretKeyRef:
+                  name: ghost-secrets
+                  key: mysql-ghost-password
+            - name: mail__options__auth__user
+              valueFrom:
+                secretKeyRef:
+                  name: ghost-secrets
+                  key: smtp-user
+            - name: mail__options__auth__pass
+              valueFrom:
+                secretKeyRef:
+                  name: ghost-secrets
+                  key: smtp-pass
+
+          volumeMounts:
+            - name: content
+              mountPath: /var/lib/ghost/content
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+
+          # Ghost takes ~30s to start; initialDelaySeconds must be longer than that.
+          # livenessProbe failure → pod restart. readinessProbe failure → removed from Service endpoints.
+          livenessProbe:
+            httpGet:
+              path: /ghost/api/v4/admin/site/
+              port: 2368
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /ghost/api/v4/admin/site/
+              port: 2368
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+
+          # Graceful shutdown: Ghost handles SIGTERM, drain in-flight requests
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: [ALL]
+
+      volumes:
+        - name: content
+          persistentVolumeClaim:
+            claimName: ghost-content
+
+      # Don't cache Docker image credentials on node — always re-auth
+      imagePullSecrets: []
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ghost
+  namespace: ghost-prod
+  annotations:
+    # ExternalDNS picks this up and creates a Route53 record
+    external-dns.alpha.kubernetes.io/hostname: blog.example.com
+spec:
+  type: ClusterIP
+  selector:
+    app: ghost
+  ports:
+    - name: http
+      port: 80
+      targetPort: 2368

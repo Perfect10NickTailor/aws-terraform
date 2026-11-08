@@ -1,0 +1,78 @@
+##
+## Ingress — AWS Application Load Balancer (ALB)
+##
+## Uses the AWS Load Balancer Controller (not nginx-ingress).
+## The controller watches for Ingress objects and provisions an ALB in AWS directly.
+##
+## Key differences from nginx ingress:
+##   - TLS terminates at the ALB using an ACM certificate (not cert-manager/Let's Encrypt)
+##   - Target type "ip" routes directly to pod IPs (bypasses kube-proxy/NodePort)
+##   - ALB is internet-facing by default; set to "internal" for private apps
+##   - WAF, Shield, access logs all configured via annotations
+##
+## Before applying:
+##   1. ACM certificate must exist for blog.example.com
+##      aws acm request-certificate --domain-name blog.example.com --validation-method DNS
+##   2. Replace CERTIFICATE_ARN below
+##   3. Route53 hosted zone must exist for example.com (ExternalDNS handles the A record)
+##
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ghost
+  namespace: ghost-prod
+  annotations:
+    # Use AWS Load Balancer Controller
+    kubernetes.io/ingress.class: alb
+
+    # Internet-facing ALB in public subnets
+    alb.ingress.kubernetes.io/scheme: internet-facing
+
+    # Route directly to pod IPs — better performance, required for sticky sessions
+    alb.ingress.kubernetes.io/target-type: ip
+
+    # ACM certificate — TLS terminates at ALB
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:ACCOUNT_ID:certificate/CERTIFICATE_ARN
+
+    # Redirect HTTP → HTTPS at the ALB
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+
+    # Health check — ALB checks this path before sending traffic to a pod
+    alb.ingress.kubernetes.io/healthcheck-path: /ghost/api/v4/admin/site/
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "10"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+
+    # Subnets — ALB must be in public subnets; discovers via tag
+    # alb.ingress.kubernetes.io/subnets: subnet-xxx,subnet-yyy,subnet-zzz
+
+    # Enable access logs to S3 (recommended for production)
+    # alb.ingress.kubernetes.io/load-balancer-attributes: access_logs.s3.enabled=true,access_logs.s3.bucket=my-alb-logs,access_logs.s3.prefix=ghost
+
+    # WAF integration (optional — attach a WAFv2 WebACL ARN)
+    # alb.ingress.kubernetes.io/wafv2-acl-arn: arn:aws:wafv2:us-east-1:ACCOUNT_ID:regional/webacl/NAME/ID
+
+    # Connection idle timeout (match your app's keep-alive)
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=60
+
+    # Security groups — by default ALB creates one; override to use your own
+    # alb.ingress.kubernetes.io/security-groups: sg-xxxxxxxxx
+
+    # Large file uploads (Ghost images)
+    alb.ingress.kubernetes.io/target-group-attributes: stickiness.enabled=false
+
+spec:
+  ingressClassName: alb
+  rules:
+    - host: blog.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ghost
+                port:
+                  number: 80

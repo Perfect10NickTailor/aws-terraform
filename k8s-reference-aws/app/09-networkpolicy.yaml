@@ -1,0 +1,81 @@
+##
+## NetworkPolicy
+##
+## Same default-deny + explicit-allow pattern as the generic reference,
+## but updated for AWS:
+##   - No mysql pod rule — RDS is outside the cluster (VPC security group controls that)
+##   - ALB communicates to pods via pod IPs in the VPC (target-type: ip)
+##     so ingress comes from within the VPC CIDR, not a specific pod/namespace
+##   - Ghost needs egress to RDS endpoint (VPC-internal), SES (443), and DNS (53)
+##
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: ghost-prod
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# ALB sends health checks and traffic from within the VPC CIDR.
+# target-type: ip means ALB connects directly to pod IPs — there's no
+# intermediate nginx pod to selector-match. Allow from the VPC CIDR block.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ghost-allow-alb-ingress
+  namespace: ghost-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: ghost
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 2368
+      # ALB health checks + traffic come from VPC CIDR (10.0.0.0/8 or your VPC block)
+      from:
+        - ipBlock:
+            cidr: 10.0.0.0/8   # replace with your actual VPC CIDR
+---
+# Ghost egress: RDS (3306 in VPC), SES SMTP (587 out), DNS (53 in VPC)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ghost-egress
+  namespace: ghost-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: ghost
+  policyTypes:
+    - Egress
+  egress:
+    # RDS — stays within VPC; VPC security group on RDS restricts source to cluster SG
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 3306
+    # SES SMTP (STARTTLS on 587)
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 587
+    # AWS Secrets Manager + Secrets Manager endpoint (HTTPS) — for ESO / SDK calls
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 443
+    # DNS
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

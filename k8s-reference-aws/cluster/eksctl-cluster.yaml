@@ -1,0 +1,111 @@
+##
+## EKS cluster config — production
+## Deploy: eksctl create cluster -f eksctl-cluster.yaml
+##
+## Prerequisites:
+##   aws-cli configured, eksctl >= 0.190, kubectl
+##   Replace all ACCOUNT_ID, OFFICE_CIDR placeholders before running.
+##
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: prod-cluster
+  region: us-east-1
+  version: "1.30"
+  tags:
+    env: production
+    team: platform
+
+# Private node groups + NAT per AZ.
+# publicAccess restricted to your CIDR — remove publicAccessCIDRs to lock down completely
+# (you'll need VPN or bastion to reach the API server).
+vpc:
+  enableDnsHostnames: true
+  enableDnsSupport: true
+  nat:
+    gateway: HighlyAvailable     # one NAT GW per AZ, not shared — avoids cross-AZ NAT cost + SPOF
+  clusterEndpoints:
+    privateAccess: true
+    publicAccess: true
+    publicAccessCIDRs:
+      - "YOUR_OFFICE_CIDR/32"    # tighten to VPN CIDR or bastion IP
+
+# OIDC provider enables IRSA (IAM Roles for Service Accounts).
+# Without this, all pods on a node share the node IAM role — too broad.
+iam:
+  withOIDC: true
+  serviceAccounts:
+    # AWS Load Balancer Controller — manages ALBs + NLBs from Ingress/Service objects
+    - metadata:
+        name: aws-load-balancer-controller
+        namespace: kube-system
+      wellKnownPolicies:
+        awsLoadBalancerController: true
+
+    # ExternalDNS — creates/updates Route53 records from Ingress/Service annotations
+    - metadata:
+        name: external-dns
+        namespace: kube-system
+      wellKnownPolicies:
+        externalDNS: true
+
+    # EBS CSI driver — required for dynamic EBS PVC provisioning on EKS 1.23+
+    # (in-tree volume plugin removed; must use CSI driver)
+    - metadata:
+        name: ebs-csi-controller-sa
+        namespace: kube-system
+      wellKnownPolicies:
+        ebsCSIController: true
+
+    # Karpenter — creates EC2 instances directly via AWS APIs (faster than cluster-autoscaler)
+    - metadata:
+        name: karpenter
+        namespace: kube-system
+      attachPolicyARNs:
+        - arn:aws:iam::ACCOUNT_ID:policy/KarpenterControllerPolicy
+        # Create this policy before running eksctl — see addons/install.sh
+
+# System node group: always-on, on-demand, for control-plane add-ons.
+# Tainted so application workloads don't land here; Karpenter handles those.
+managedNodeGroups:
+  - name: system
+    instanceType: m5.large
+    minSize: 2
+    maxSize: 4
+    desiredCapacity: 2
+    privateNetworking: true
+    availabilityZones:
+      - us-east-1a
+      - us-east-1b
+      - us-east-1c
+    labels:
+      role: system
+    taints:
+      - key: CriticalAddonsOnly
+        value: "true"
+        effect: NoSchedule
+    iam:
+      attachPolicyARNs:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+    # Karpenter nodes need a different instance profile — see addons/install.sh
+    tags:
+      karpenter.sh/discovery: prod-cluster   # Karpenter uses this to find which subnets/SGs to use
+
+# EKS managed add-ons — AWS handles upgrades, compatibility, security patches.
+# vpc-cni: enables prefix delegation (more IPs per node; avoids EC2 IP exhaustion on large clusters).
+addons:
+  - name: vpc-cni
+    version: latest
+    configurationValues: '{"env":{"ENABLE_PREFIX_DELEGATION":"true","ENABLE_POD_ENI":"true"}}'
+  - name: coredns
+    version: latest
+  - name: kube-proxy
+    version: latest
+  - name: aws-ebs-csi-driver
+    version: latest
+    wellKnownPolicies:
+      ebsCSIController: true
+  # EFS CSI driver is NOT a managed add-on — install via Helm (see addons/install.sh)

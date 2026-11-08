@@ -1,0 +1,44 @@
+##
+## EFS StorageClass + PersistentVolumeClaim
+##
+## Why EFS instead of EBS for Ghost content:
+##   EBS = ReadWriteOnce — only one node can mount it. With 2+ Ghost replicas
+##   spread across AZs, pods on different nodes all need the /content volume.
+##   EBS breaks this. EFS = ReadWriteMany, NFS-backed, accessible from all AZs.
+##
+## Alternative: use Ghost's S3 storage adapter (see comment in 04-configmap.yaml).
+## S3 adapter is better for truly stateless pods but requires a custom Ghost image.
+## EFS is simpler if you want to keep stock Ghost.
+##
+## Before applying:
+##   1. EFS filesystem must exist (install.sh creates it and prints EFS_FS_ID)
+##   2. Replace EFS_FILESYSTEM_ID below with the actual fs-xxxxxxxxx ID
+##   3. EFS CSI driver must be installed (install.sh step 4)
+##
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: efs-sc
+provisioner: efs.csi.aws.com
+parameters:
+  provisioningMode: efs-ap         # access point per PVC — isolated directory per claim
+  fileSystemId: EFS_FILESYSTEM_ID  # replace with actual fs-xxxxxxxxx
+  directoryPerms: "700"
+  gidRangeStart: "1000"
+  gidRangeEnd: "2000"
+  basePath: "/ghost"
+reclaimPolicy: Retain              # don't delete EFS data when PVC is deleted
+volumeBindingMode: Immediate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ghost-content
+  namespace: ghost-prod
+spec:
+  accessModes:
+    - ReadWriteMany    # multiple pods on multiple nodes can mount simultaneously
+  storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 20Gi   # EFS is elastic — this is a soft advisory, not a hard limit

@@ -1,0 +1,105 @@
+##
+## Job — database migration (init container pattern)
+##
+## Run schema migrations before deploying a new app version.
+## Two patterns shown:
+##
+##   1. Standalone Job (this file) — run `kubectl apply` in CI before rolling out the Deployment.
+##      CI waits for the Job to succeed before deploying the new Deployment image.
+##      Good for: teams with CI/CD pipelines (ArgoCD hooks, GitHub Actions job dependency).
+##
+##   2. Init container (commented at bottom) — run migration inside the pod before the app starts.
+##      Simpler operationally; but ALL replicas run it on startup, so migrations must be idempotent
+##      and safe to run concurrently (use IF NOT EXISTS, advisory locks, or a migration tool with locking).
+##
+## Ghost uses Knex for DB migrations and runs them automatically on startup —
+## init container pattern is the natural fit. The standalone Job is the pattern
+## for apps where you control the migration step separately.
+##
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ghost-db-migrate-v5-1-0    # version in name — each deploy gets a new Job name
+  namespace: ghost-prod
+  labels:
+    app: ghost
+    job-type: migration
+    version: "5.1.0"
+  annotations:
+    # ArgoCD / Flux can use hooks to run this before syncing the Deployment
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  backoffLimit: 0                  # migrations are not safe to retry blindly — fail fast
+  activeDeadlineSeconds: 300       # kill if migration takes more than 5 min (stuck lock detection)
+  template:
+    metadata:
+      labels:
+        app: ghost-migration
+    spec:
+      serviceAccountName: ghost
+      restartPolicy: Never         # Never for migrations — don't retry a partial migration
+      containers:
+        - name: migrate
+          image: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/ghost-custom:v5.1.0
+          command: ["node", "node_modules/.bin/knex", "migrate:latest"]
+          envFrom:
+            - configMapRef:
+                name: ghost-config
+          env:
+            - name: database__connection__password
+              valueFrom:
+                secretKeyRef:
+                  name: ghost-secrets
+                  key: mysql-ghost-password
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 256Mi
+            limits:
+              cpu: "500m"
+              memory: 512Mi
+
+##
+## Init container pattern (alternative — embed in Deployment spec):
+##
+## spec:
+##   template:
+##     spec:
+##       initContainers:
+##         - name: wait-for-db
+##           image: busybox:1.36
+##           command:
+##             - sh
+##             - -c
+##             - |
+##               until nc -z $DB_HOST 3306; do
+##                 echo "waiting for RDS..."
+##                 sleep 2
+##               done
+##           env:
+##             - name: DB_HOST
+##               valueFrom:
+##                 configMapKeyRef:
+##                   name: ghost-config
+##                   key: database__connection__host
+##         - name: migrate
+##           image: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/ghost-custom:v5.1.0
+##           command: ["node", "node_modules/.bin/knex", "migrate:latest"]
+##           envFrom:
+##             - configMapRef:
+##                 name: ghost-config
+##           env:
+##             - name: database__connection__password
+##               valueFrom:
+##                 secretKeyRef:
+##                   name: ghost-secrets
+##                   key: mysql-ghost-password
+##       containers:
+##         - name: ghost
+##           ...
+##
+## initContainers run in order, sequentially. The main container only starts after ALL
+## initContainers exit successfully. If an initContainer fails, the pod restarts
+## (all initContainers re-run — must be idempotent).
+##

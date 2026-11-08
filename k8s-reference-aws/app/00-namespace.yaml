@@ -1,0 +1,52 @@
+##
+## Namespace + ResourceQuota + LimitRange
+##
+## ResourceQuota: hard cap on total resources the namespace can consume.
+## LimitRange:    default requests/limits injected into containers that don't set them.
+##
+## Both together prevent a single namespace from starving the cluster AND
+## ensure every pod has requests (required for HPA and correct scheduling).
+##
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ghost-prod
+  labels:
+    name: ghost-prod
+    env: production
+    # PodSecurity admission — enforce restricted profile in prod
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: ghost-prod-quota
+  namespace: ghost-prod
+spec:
+  hard:
+    requests.cpu: "8"
+    requests.memory: 16Gi
+    limits.cpu: "16"
+    limits.memory: 32Gi
+    pods: "50"
+    persistentvolumeclaims: "10"
+    services: "10"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: ghost-prod-defaults
+  namespace: ghost-prod
+spec:
+  limits:
+    - type: Container
+      default:          # applied if container omits limits
+        cpu: "500m"
+        memory: 512Mi
+      defaultRequest:   # applied if container omits requests
+        cpu: "100m"
+        memory: 128Mi
+      max:              # container cannot exceed these
+        cpu: "4"
+        memory: 8Gi

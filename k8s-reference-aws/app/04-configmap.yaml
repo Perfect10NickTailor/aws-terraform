@@ -1,0 +1,42 @@
+##
+## ConfigMap — non-secret configuration
+##
+## RDS endpoint replaces the in-cluster MySQL StatefulSet.
+## RDS gives you: Multi-AZ failover, automated backups, read replicas,
+## and instance resizing without touching k8s at all.
+##
+## Replace RDS_ENDPOINT with your actual RDS instance endpoint.
+## It looks like: ghost-db.xxxxxxxxxx.us-east-1.rds.amazonaws.com
+##
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ghost-config
+  namespace: ghost-prod
+data:
+  NODE_ENV: "production"
+  url: "https://blog.example.com"
+
+  # RDS MySQL — not an in-cluster StatefulSet
+  database__client: "mysql"
+  database__connection__host: "RDS_ENDPOINT"
+  database__connection__port: "3306"
+  database__connection__database: "ghost"
+
+  # SMTP via SES
+  mail__transport: "SMTP"
+  mail__options__service: "SES"
+  mail__options__host: "email-smtp.us-east-1.amazonaws.com"
+  mail__options__port: "587"
+  mail__options__secure: "false"
+  mail__from: "noreply@example.com"
+
+  # Ghost storage adapter — use S3 instead of local filesystem
+  # Requires ghost-storage-adapter-s3 installed in the Ghost image
+  # storage__active: "s3"
+  # storage__s3__bucket: "ghost-uploads-prod"
+  # storage__s3__region: "us-east-1"
+
+  # Logging
+  logging__level: "info"
+  logging__transports: '["stdout"]'

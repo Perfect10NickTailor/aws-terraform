@@ -1,0 +1,105 @@
+##
+## RBAC — Role-Based Access Control
+##
+## k8s RBAC controls which ServiceAccounts (and humans) can do what to which resources.
+## In production you give every workload the minimum API server access it needs — usually
+## none. The Ghost service account has no k8s API permissions by default; this file shows
+## the patterns you'd use if it needed them (e.g. to read ConfigMaps, watch Secrets).
+##
+## Key objects:
+##   Role           — namespaced; grants access to resources in one namespace
+##   ClusterRole    — cluster-wide; grants access across all namespaces (or non-namespaced resources)
+##   RoleBinding    — binds a Role or ClusterRole to subjects within a namespace
+##   ClusterRoleBinding — binds a ClusterRole to subjects cluster-wide
+##
+## Rule of thumb:
+##   Use Role + RoleBinding unless you genuinely need cluster-scope (ClusterRole + CRB).
+##   A ClusterRole can be bound into a namespace with a RoleBinding — best of both worlds.
+##
+---
+# Example: Ghost only needs to read its own ConfigMap (most apps need zero API access)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ghost-reader
+  namespace: ghost-prod
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["ghost-config"]   # scoped to this specific ConfigMap — not all ConfigMaps
+    verbs: ["get", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["ghost-secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ghost-reader-binding
+  namespace: ghost-prod
+subjects:
+  - kind: ServiceAccount
+    name: ghost
+    namespace: ghost-prod
+roleRef:
+  kind: Role
+  name: ghost-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+##
+## Cluster-level RBAC: giving a human (or CI system) read-only cluster access.
+## Never give CI/CD ClusterAdmin — give it the minimum needed for the deployment.
+##
+## Common CI role: create/update Deployments + Services in specific namespaces only.
+##
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer
+  namespace: ghost-prod
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-deployer-binding
+  namespace: ghost-prod
+subjects:
+  - kind: ServiceAccount
+    name: github-actions-sa     # or a human IAM identity via aws-auth
+    namespace: kube-system
+roleRef:
+  kind: Role
+  name: deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+##
+## aws-auth ConfigMap note (not shown here — it lives in kube-system):
+##
+## EKS maps IAM principals to k8s RBAC via the aws-auth ConfigMap.
+## eksctl manages it. To give a human read-only access:
+##
+##   eksctl create iamidentitymapping \
+##     --cluster prod-cluster \
+##     --arn arn:aws:iam::ACCOUNT_ID:user/alice \
+##     --group system:masters \    # or a custom group bound to a Role
+##     --username alice
+##
+## For EKS Access Entries (newer API, replaces aws-auth):
+##   aws eks create-access-entry --cluster-name prod-cluster \
+##     --principal-arn arn:aws:iam::ACCOUNT_ID:user/alice \
+##     --kubernetes-groups readers
+##

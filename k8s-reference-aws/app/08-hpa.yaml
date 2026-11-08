@@ -1,0 +1,50 @@
+##
+## HorizontalPodAutoscaler
+##
+## Scales Ghost pods based on CPU + memory.
+## Karpenter scales nodes automatically when pods are unschedulable —
+## HPA and Karpenter work together: HPA adds pods, Karpenter adds nodes.
+##
+## Note: HPA on CPU alone lies to you for Node.js apps. Ghost's CPU usage
+## is low even under heavy load because Node is single-threaded and async.
+## Memory is a better signal here. Add custom metrics (RPS, latency) from
+## CloudWatch or Prometheus if you want precise autoscaling.
+##
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ghost
+  namespace: ghost-prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ghost
+  minReplicas: 2    # always at least 2 for HA; PDB enforces ≥1 during disruption
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300   # wait 5min before scaling down (prevents thrashing)
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60             # remove at most 50% of pods per minute
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30             # can double pod count every 30s under sudden load

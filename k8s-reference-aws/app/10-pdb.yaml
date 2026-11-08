@@ -1,0 +1,22 @@
+##
+## PodDisruptionBudget
+##
+## Guarantees at least 1 Ghost pod stays up during voluntary disruptions:
+## node drains (kubectl drain), Karpenter consolidation, cluster upgrades.
+##
+## Without PDB: kubectl drain can terminate all pods simultaneously → downtime.
+## With PDB: drain is blocked until the evicted pod is replaced and ready.
+##
+## minAvailable: 1 = always keep at least 1 pod running.
+## With minReplicas: 2 on HPA, this means only 1 pod can be disrupted at a time.
+##
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ghost
+  namespace: ghost-prod
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: ghost

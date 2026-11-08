@@ -1,0 +1,92 @@
+##
+## CronJob — scheduled database backup to S3
+##
+## Runs mysqldump against RDS and uploads to S3 on a schedule.
+## This pattern applies to any periodic task: cache warm, report generation,
+## data cleanup, certificate rotation checks, etc.
+##
+## The ghost ServiceAccount's IRSA role needs s3:PutObject on the backup bucket.
+##
+## Key CronJob concepts:
+##   schedule:                   standard cron syntax (UTC)
+##   concurrencyPolicy: Forbid   don't start a new run if the previous is still running
+##   successfulJobsHistoryLimit  keep N completed job pods for log inspection
+##   failedJobsHistoryLimit      keep N failed job pods before garbage collecting
+##   startingDeadlineSeconds     if the job misses its window by this many seconds, skip it
+##
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ghost-db-backup
+  namespace: ghost-prod
+spec:
+  schedule: "0 3 * * *"           # 03:00 UTC daily
+  concurrencyPolicy: Forbid        # skip new run if previous backup still running
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 3600    # skip if missed by more than 1h (e.g. cluster was down)
+  jobTemplate:
+    spec:
+      backoffLimit: 2              # retry up to 2 times on failure
+      activeDeadlineSeconds: 3600  # kill job if it runs longer than 1h (stuck pipe detection)
+      template:
+        metadata:
+          labels:
+            app: ghost-db-backup
+            job-type: backup
+        spec:
+          serviceAccountName: ghost   # inherits IRSA — can write to S3
+          restartPolicy: OnFailure    # Jobs use OnFailure or Never, not Always
+          containers:
+            - name: backup
+              image: amazon/aws-cli:latest   # has aws cli + can add mysqldump
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -euo pipefail
+                  DATE=$(date +%Y-%m-%d-%H%M%S)
+                  BACKUP_FILE="/tmp/ghost-${DATE}.sql.gz"
+
+                  echo "Starting backup at ${DATE}..."
+                  mysqldump \
+                    --host="${DB_HOST}" \
+                    --user="${DB_USER}" \
+                    --password="${DB_PASS}" \
+                    --single-transaction \
+                    --routines \
+                    --triggers \
+                    ghost | gzip > "${BACKUP_FILE}"
+
+                  echo "Uploading to S3..."
+                  aws s3 cp "${BACKUP_FILE}" "s3://ghost-backups-prod/db/${DATE}.sql.gz"
+
+                  echo "Backup complete: ${DATE}.sql.gz"
+                  rm "${BACKUP_FILE}"
+              env:
+                - name: DB_HOST
+                  valueFrom:
+                    configMapKeyRef:
+                      name: ghost-config
+                      key: database__connection__host
+                - name: DB_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: ghost-secrets
+                      key: mysql-ghost-user
+                - name: DB_PASS
+                  valueFrom:
+                    secretKeyRef:
+                      name: ghost-secrets
+                      key: mysql-ghost-password
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: 128Mi
+                limits:
+                  cpu: "500m"
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+                runAsUser: 1000
